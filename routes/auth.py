@@ -7,9 +7,9 @@ from db.redis_client import redis_client
 from utils.limiter import limiter
 from utils.otp import generate_otp
 from tasks.email_tasks import send_otp_email
+from utils.bloom_filter_instance import email_bloom_filter
 
 router = APIRouter()
-
 
 @router.post("/signup", status_code=status.HTTP_201_CREATED)
 async def signup(data: SignupRequest):
@@ -29,6 +29,8 @@ async def signup(data: SignupRequest):
         "verified": False
     }
     await db.users.insert_one(user)
+
+    email_bloom_filter.add(data.email)  # Add the email to the Bloom filter 
 
     otp_code = generate_otp()
     redis_client.setex(f"otp:{data.email}", 300, otp_code)
