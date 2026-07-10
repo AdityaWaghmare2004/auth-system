@@ -1,6 +1,3 @@
-Yes — the README currently only covers phases 1-6. Let's update it to reflect everything you've built. Open `README.md` and replace the entire contents with this:
-
-```markdown
 # Auth System
 
 A production-style authentication system built with FastAPI, as a learn-by-doing project. Built incrementally, phase by phase, to deeply understand each concept rather than copy-pasting a finished solution.
