@@ -8,38 +8,58 @@ from utils.limiter import limiter
 from utils.otp import generate_otp
 from tasks.email_tasks import send_otp_email
 from utils.bloom_filter_instance import email_bloom_filter
+from utils.kafka_producer import producer
 
 router = APIRouter()
 
 @router.post("/signup", status_code=status.HTTP_201_CREATED)
 async def signup(data: SignupRequest):
-    """Register a new user, hash their password, and queue an OTP verification email."""
-    existing = await db.users.find_one({"email": data.email})
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Email already registered"
-        )
+    """Register a new user via Kafka-based batch writing with write-through Redis cache."""
 
+    # 1. Bloom filter — cheapest possible duplicate check
+    if email_bloom_filter.contains(data.email):
+        existing = await db.users.find_one({"email": data.email})
+        if existing:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Email already registered"
+            )
+        cached = redis_client.hgetall(f"user:{data.email}")
+        if cached:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Email already registered"
+            )
+
+    # 2. Hash the password
     hashed = bcrypt.hashpw(data.password.encode("utf-8"), bcrypt.gensalt())
+    hashed_str = hashed.decode("utf-8")
 
-    user = {
+    # 3. Write-through cache — store in Redis immediately
+    redis_client.hset(f"user:{data.email}", mapping={
         "email": data.email,
-        "password": hashed,
+        "password": hashed_str,
+        "verified": "false"
+    })
+
+    # 4. Publish to Kafka — consumer will batch insert into MongoDB
+    user_payload = {
+        "email": data.email,
+        "password": hashed_str,
         "verified": False
     }
-    await db.users.insert_one(user)
+    producer.send("user_signups", value=user_payload)
+    producer.flush()
 
-    email_bloom_filter.add(data.email)  # Add the email to the Bloom filter 
+    # 5. Add to bloom filter
+    email_bloom_filter.add(data.email)
 
+    # 6. Generate and send OTP
     otp_code = generate_otp()
     redis_client.setex(f"otp:{data.email}", 300, otp_code)
-
     send_otp_email.delay(data.email, otp_code)
 
     return {"message": "User created successfully"}
-
-
 @router.post("/login")
 @limiter.limit("5/minute")
 async def login(request: Request, data: LoginRequest):
